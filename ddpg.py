@@ -1,7 +1,10 @@
 from collections import deque
 import random
 import numpy as np
+import torch
 
+use_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if use_cuda else "cpu")
 
 class ReplayBuffer(object):
 
@@ -67,3 +70,68 @@ class OrnsteinUhlenbeckActionNoise:
 
     def __repr__(self):
         return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
+
+class DDPG:
+    def __init__(self, actor, critic, target_actor, target_critic, gamma, batch_size, train_mode):
+
+        self.actor = actor
+        self.critic = critic
+        self.target_actor = target_actor
+        self.target_critic = target_critic
+        self.gamma = gamma
+        self.batch_size = batch_size
+        self.train_mode = train_mode
+
+        self.target_actor.hard_copy(actor)
+        self.target_critic.hard_copy(critic)
+
+        self.ou = OrnsteinUhlenbeckActionNoise(mu=np.zeros(1,))
+        self.buffer = ReplayBuffer(100000)
+
+    def load(self, filename_actor, filename_critic):
+        try:
+            self.critic.load_model(filename_critic)
+            self.actor.load_model(filename_actor)
+        except Exception as e:
+            print(e.__repr__)
+
+    def act(self, obs):
+        state = torch.FloatTensor(obs).unsqueeze(0).to(device)
+
+        noise = self.ou()
+        noise = torch.FloatTensor(noise).unsqueeze(0).to(device)
+        action = self.actor(state)
+
+        if self.train_mode:
+            action = action + noise
+        action = action.cpu().detach().numpy()[0]
+        return action
+
+    def train(self, action, reward, state, state2, done):
+        self.buffer.add(state, action, reward, done, state2)
+        ep_ave_max_q_value = 0
+
+        if self.buffer.size() > self.batch_size:
+            s_batch, a_batch, r_batch, t_batch, s2_batch = self.buffer.sample_batch(self.batch_size)
+
+            s_batch = torch.FloatTensor(s_batch).to(device)
+            a_batch = torch.FloatTensor(a_batch).to(device)
+            r_batch = torch.FloatTensor(r_batch).to(device)
+            t_batch = torch.FloatTensor(t_batch).to(device)
+            s2_batch = torch.FloatTensor(s2_batch).to(device)
+
+            target_action2 = self.target_actor(s2_batch)
+            predicted_q_value = self.target_critic(s2_batch, target_action2)
+
+            yi = r_batch + ((1 - t_batch) * self.gamma * predicted_q_value).detach()
+
+            predictions = self.critic.train_step(s_batch, a_batch, yi)
+
+            ep_ave_max_q_value = np.amax(predictions.cpu().detach().numpy())
+
+            self.actor.train_step(self.critic, s_batch)
+
+            self.target_actor.update(self.actor)
+            self.target_critic.update(self.critic)
+        
+        return ep_ave_max_q_value

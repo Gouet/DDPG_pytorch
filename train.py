@@ -4,12 +4,28 @@ import numpy as np
 import ddpg
 import os
 import agent
+import argparse
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-TRAIN_MODE = False
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
+
+def parse_args():
+    parser = argparse.ArgumentParser('Reinforcement Learning parser for DDPG')
+
+    parser.add_argument('--scenario', type=str, default='Pendulum-v0')
+    parser.add_argument('--eval', action='store_false')
+
+    parser.add_argument('--load-episode-saved', type=int, default=50)
+    parser.add_argument('--saved-episode', type=int, default=50)
+
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--max-episode', type=int, default=10000)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--tau', type=float, default=0.001)
+
+    return parser.parse_args()
 
 try:  
     os.mkdir('./saved')
@@ -18,102 +34,54 @@ except OSError:
 else:  
     print ("Successfully created the directory")
 
-env = gym.make('Pendulum-v0')
-
-critic = agent.Critic(3, 1).to(device)
-actor = agent.Actor(3, 2).to(device)
-target_critic = agent.Critic(3, 1, 0.001).to(device)
-target_actor = agent.Actor(3, 2, 0.001).to(device)
-
-actor.eval()
-critic.eval()
-target_actor.eval()
-target_critic.eval()
-
-try:
-    critic.load_model('./saved/critic')
-    actor.load_model('./saved/actor')
-except Exception as e:
-    print(e.__repr__)
-
-target_actor.hard_copy(actor)
-target_critic.hard_copy(critic)
-
-ou = ddpg.OrnsteinUhlenbeckActionNoise(mu=np.zeros(1,))
-buffer = ddpg.ReplayBuffer(100000)
-global ep_ave_max_q_value
-ep_ave_max_q_value = 0
-global total_reward
-total_reward = 0
-
-if TRAIN_MODE:
+def main(arglist):
+    env = gym.make(arglist.scenario)
     writer = SummaryWriter(log_dir='./logs/')
 
-def train(action, reward, state, state2, done):
-    global ep_ave_max_q_value
+    critic = agent.Critic(env.observation_space.shape[0], env.action_space.shape[0]).to(device)
+    actor = agent.Actor(env.observation_space.shape[0], 2).to(device)
+    target_critic = agent.Critic(env.observation_space.shape[0], env.action_space.shape[0], arglist.tau).to(device)
+    target_actor = agent.Actor(env.observation_space.shape[0], 2, arglist.tau).to(device)
     
-    buffer.add(state, action, reward, done, state2)
-    batch_size = 64
+    actor.eval()
+    critic.eval()
+    target_actor.eval()
+    target_critic.eval()
 
-    if buffer.size() > batch_size:
-        s_batch, a_batch, r_batch, t_batch, s2_batch = buffer.sample_batch(batch_size)
+    ddpg_algo = ddpg.DDPG(actor, critic, target_actor, target_critic, arglist.gamma, arglist.batch_size, arglist.eval)
+    ddpg_algo.load('./saved/actor_' + str(arglist.load_episode_saved), './saved/critic_' + str(arglist.load_episode_saved))
 
-        s_batch = torch.FloatTensor(s_batch).to(device)
-        a_batch = torch.FloatTensor(a_batch).to(device)
-        r_batch = torch.FloatTensor(r_batch).to(device)
-        t_batch = torch.FloatTensor(t_batch).to(device)
-        s2_batch = torch.FloatTensor(s2_batch).to(device)
+    for episode in range(arglist.max_episode):
+        obs = env.reset()
+        done = False
+        j = 0
+        ep_ave_max_q_value = 0
+        total_reward = 0
+        while not done:
+            if not arglist.eval:
+                env.render()
+            
+            action = ddpg_algo.act(obs)
 
-        target_action2 = target_actor(s2_batch)
-        predicted_q_value = target_critic(s2_batch, target_action2)
+            obs2, reward, done, info = env.step(action)
+            total_reward += reward
 
-        yi = r_batch + ((1 - t_batch) * 0.99 * predicted_q_value).detach()
+            if arglist.eval:
+                ep_ave_max_q_value += ddpg_algo.train(action, [reward], obs, obs2, [done])
+            obs = obs2
+            j += 1
 
-        predictions = critic.train_step(s_batch, a_batch, yi)
+        if arglist.eval and episode % arglist.saved_episode == 0 and episode > 0:
+            critic.save_model('./saved/critic_' + str(episode))
+            actor.save_model('./saved/actor_' + str(episode))
 
-        ep_ave_max_q_value += np.amax(predictions.cpu().detach().numpy())
+        if arglist.eval:
+            print('average_max_q: ', ep_ave_max_q_value / float(j), 'reward: ', total_reward, 'episode:', episode)
+            writer.add_scalar('Average_max_q', ep_ave_max_q_value / float(j), episode)
+            writer.add_scalar('Reward', total_reward, episode)
 
-        actor.train_step(critic, s_batch)
+    env.close()
 
-        target_actor.update(actor)
-        target_critic.update(critic)
-
-for episode in range(10000):
-    obs = env.reset()
-    done = False
-    j = 0
-    ep_ave_max_q_value = 0
-    total_reward = 0
-    while not done:
-        if not TRAIN_MODE:
-            env.render()
-        state = torch.FloatTensor(obs).unsqueeze(0).to(device)
-        
-        noise = ou()
-        noise = torch.FloatTensor(noise).unsqueeze(0).to(device)
-        action = actor(state)
-
-
-        if TRAIN_MODE:
-            action = action + noise
-
-        action = action.cpu().detach().numpy()[0]
-
-        obs2, reward, done, info = env.step(action)
-        total_reward += reward
-
-        if TRAIN_MODE:
-            train(action, [reward], obs, obs2, [done])
-        obs = obs2
-        j += 1
-
-    if TRAIN_MODE:
-        critic.save_model('./saved/critic')
-        actor.save_model('./saved/actor')
-
-    if TRAIN_MODE:
-        print('average_max_q: ', ep_ave_max_q_value / float(j), 'reward: ', total_reward, 'episode:', episode)
-        writer.add_scalar('Average_max_q', ep_ave_max_q_value / float(j), episode)
-        writer.add_scalar('Reward', total_reward, episode)
-
-env.close()
+if __name__ == "__main__":
+    arglist = parse_args()
+    main(arglist)

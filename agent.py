@@ -16,6 +16,7 @@ class Actor(torch.nn.Module):
         super(Actor, self).__init__()
 
         self.scaled = scaled
+        print('self.scaled:', self.scaled)
         self.tau = tau
 
         self._fc1 = torch.nn.Linear(inputs, 400)
