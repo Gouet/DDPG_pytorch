@@ -4,9 +4,11 @@ The DDPG algortithme has been tested with the Pendulum GYM env.
 Using Pytorch 1.3.0
 
 **Launch for traning**
+
 python train.py --scenario=Pendulum-v0 --saved-episode 50
 
 **Launch for testing**
+
 python train.py --scenario=Pendulum-v0 --eval --load-episode-saved=160
 
 # Optional parameters
